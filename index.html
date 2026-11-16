@@ -43,6 +43,7 @@
   --warn-bg: #3a2e12; --warn-ink: #ffd58a; --bad: #ff8a73; color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
 body {
   margin: 0; background: var(--bg); color: var(--ink); font-family: var(--text); font-size: 15px; line-height: 1.55;
@@ -120,7 +121,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
 
   <section class="panel readout" aria-live="polite">
     <div class="phase" id="phase">準備好了</div>
-    <div class="big"><span id="bigNum">—</span><small>Mbps</small></div>
+    <div class="big"><span id="bigNum">--</span><small>Mbps</small></div>
     <div class="bar"><i id="barFill"></i></div>
     <div class="used" id="used">每次約用 100 MB 行動數據（下載 80 MB＋上傳 20 MB）</div>
   </section>
@@ -158,6 +159,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
   const BASE = "https://speed.cloudflare.com";
   const DOWN_STREAMS = 4, DOWN_EACH = 20_000_000;   // 4 × 20 MB = 80 MB
   const UP_STREAMS = 4, UP_EACH = 5_000_000;        // 4 × 5 MB = 20 MB
+  const DOWN_MAX_SEC = 20, UP_MAX_SEC = 15;         // 網路很慢時的時間上限
   const PING_COUNT = 12;
   const KEY = "speedtest-history-v1";
   const COLO = { TPE: "台北", KHH: "高雄", RMQ: "台中", HKG: "香港", NRT: "東京", HND: "東京", KIX: "大阪", FUK: "福岡", SIN: "新加坡", ICN: "首爾", MNL: "馬尼拉", LAX: "洛杉磯", SJC: "聖荷西" };
@@ -226,54 +228,70 @@ h2 { margin: 0 0 8px; font-size: 15px; }
     return { ping: median, jitter: jit / (times.length - 1), colo };
   }
 
+  // 下載：4 條同時抓，最多 80 MB 或 20 秒（網路慢時不會一直跑）；某一條斷線就用已收到的量算
   async function measureDown(signal) {
-    let got = 0, tFirst = 0;
+    let got = 0, tFirst = 0, tEnd = 0, fails = 0;
     const total = DOWN_STREAMS * DOWN_EACH;
+    const stop = new AbortController();
+    const onUserAbort = () => stop.abort();
+    signal.addEventListener("abort", onUserAbort);
+    const deadline = setTimeout(() => { tEnd = performance.now(); stop.abort(); }, DOWN_MAX_SEC * 1000);
     const tick = setInterval(() => {
       if (tFirst) { const sec = (performance.now() - tFirst) / 1000; if (sec > 0.3) setBig(fmt(got * 8 / sec / 1e6)); }
-      setBar(got / total); setUsed();
+      setBar(Math.max(got / total, tFirst ? (performance.now() - tFirst) / 1000 / DOWN_MAX_SEC : 0)); setUsed();
     }, 250);
     try {
       await Promise.all(Array.from({ length: DOWN_STREAMS }, async () => {
-        const r = await fetch(`${BASE}/__down?bytes=${DOWN_EACH}&r=${rnd()}`, { cache: "no-store", signal });
-        if (!r.ok) throw new Error("下載伺服器回應 " + r.status);
-        if (!lastColo) lastColo = r.headers.get("cf-meta-colo") || "";
-        const reader = r.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!tFirst) tFirst = performance.now();
-          got += value.length; used += value.length;
-        }
+        try {
+          const r = await fetch(`${BASE}/__down?bytes=${DOWN_EACH}&r=${rnd()}`, { cache: "no-store", signal: stop.signal });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          if (!lastColo) lastColo = r.headers.get("cf-meta-colo") || "";
+          const reader = r.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!tFirst) tFirst = performance.now();
+            got += value.length; used += value.length;
+          }
+        } catch (e) { if (!stop.signal.aborted) fails++; }
       }));
-    } finally { clearInterval(tick); }
-    return got * 8 / ((performance.now() - tFirst) / 1000) / 1e6;
+    } finally { clearInterval(tick); clearTimeout(deadline); signal.removeEventListener("abort", onUserAbort); }
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (!got || !tFirst) throw new Error("下載沒有收到資料");
+    const sec = ((tEnd || performance.now()) - tFirst) / 1000;
+    return { mbps: got * 8 / sec / 1e6, unstable: fails > 0 };
   }
 
-  function measureUp() {
+  // 上傳：4 條同時傳，最多 20 MB 或 15 秒；某一條斷線就用已送出的量算
+  function measureUp(signal) {
     const chunk = new Uint8Array(UP_EACH);
     for (let i = 0; i < UP_EACH; i += 65536) crypto.getRandomValues(chunk.subarray(i, Math.min(i + 65536, UP_EACH)));
     const sent = new Array(UP_STREAMS).fill(0), total = UP_STREAMS * UP_EACH;
-    const t0 = performance.now(); let base = used;
+    const t0 = performance.now(), base = used; let tEnd = 0, fails = 0;
+    const sum = () => sent.reduce((a, b) => a + b, 0);
     const tick = setInterval(() => {
-      const s = sent.reduce((a, b) => a + b, 0), sec = (performance.now() - t0) / 1000;
-      used = base + s; setUsed(); setBar(s / total);
+      const s = sum(), sec = (performance.now() - t0) / 1000;
+      used = base + s; setUsed(); setBar(Math.max(s / total, sec / UP_MAX_SEC));
       if (sec > 0.5) setBig(fmt(s * 8 / sec / 1e6));
     }, 250);
-    return Promise.all(Array.from({ length: UP_STREAMS }, (_, i) => new Promise((res, rej) => {
-      const x = new XMLHttpRequest(); xhrs.push(x);
+    const mine = [];
+    const deadline = setTimeout(() => { tEnd = performance.now(); mine.forEach(x => { try { x.abort(); } catch {} }); }, UP_MAX_SEC * 1000);
+    return Promise.all(Array.from({ length: UP_STREAMS }, (_, i) => new Promise(res => {
+      const x = new XMLHttpRequest(); xhrs.push(x); mine.push(x);
       x.open("POST", `${BASE}/__up?r=${rnd()}`);
       x.setRequestHeader("Content-Type", "text/plain");
       x.upload.onprogress = e => { sent[i] = e.loaded; };
       x.onload = () => { sent[i] = UP_EACH; res(); };
-      x.onerror = () => rej(new Error("上傳失敗，請確認網路"));
-      x.onabort = () => rej(new DOMException("aborted", "AbortError"));
+      x.onerror = () => { fails++; res(); };
+      x.onabort = () => res();
       x.send(new Blob([chunk]));
     }))).then(() => {
-      const sec = (performance.now() - t0) / 1000;
-      used = base + total; setUsed();
-      return total * 8 / sec / 1e6;
-    }).finally(() => clearInterval(tick));
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      const s = sum();
+      if (!s) throw new Error("上傳沒有送出資料");
+      used = base + s; setUsed();
+      return { mbps: s * 8 / (((tEnd || performance.now()) - t0) / 1000) / 1e6, unstable: fails > 0 };
+    }).finally(() => { clearInterval(tick); clearTimeout(deadline); });
   }
 
   async function run() {
@@ -289,22 +307,23 @@ h2 { margin: 0 0 8px; font-size: 15px; }
       $("rPing").textContent = Math.round(p.ping); $("rJit").textContent = `ms｜抖動 ${Math.round(p.jitter)}`;
 
       $("phase").textContent = "2／3　測下載"; setBar(0); setBig("0");
-      const down = await measureDown(abort.signal);
+      const d = await measureDown(abort.signal), down = d.mbps;
       $("rDown").textContent = fmt(down);
 
       $("phase").textContent = "3／3　測上傳"; setBar(0); setBig("0");
-      const up = await measureUp();
+      const u = await measureUp(abort.signal), up = u.mbps;
       $("rUp").textContent = fmt(up);
 
       $("phase").textContent = "完成"; setBig(fmt(down)); setBar(1);
       const place = $("place").value.trim();
-      const rec = { t: Date.now(), place, down, up, ping: p.ping, jitter: p.jitter, colo: p.colo || lastColo, net: netType(), used };
+      const unstable = d.unstable || u.unstable || p.jitter > 100;
+      const rec = { t: Date.now(), place, down, up, ping: p.ping, jitter: p.jitter, colo: p.colo || lastColo, net: netType(), used, unstable };
       const h = loadHist(); h.unshift(rec); saveHist(h); renderHist();
       showVerdict(rec);
     } catch (e) {
       if (e.name === "AbortError") { $("phase").textContent = "已停止"; }
       else { $("phase").textContent = "測速失敗：" + (e.message || "連不到測速伺服器") + "。確認有網路、VPN 已關後再試一次。"; }
-      setBig("—");
+      setBig("--");
     } finally {
       running = false; btn.textContent = "開始測速"; btn.classList.remove("stop");
       setUsed(); try { lock && lock.release(); } catch {}
@@ -315,7 +334,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
     const min2g = (2e9 * 8 / (r.down * 1e6)) / 60;
     const level = r.down >= 200 ? "很快" : r.down >= 50 ? "不錯" : r.down >= 10 ? "普通" : "很慢";
     const t = min2g < 1 ? "不到 1 分鐘" : min2g < 60 ? `約 ${Math.round(min2g)} 分鐘` : `約 ${(min2g / 60).toFixed(1)} 小時`;
-    $("verdict").textContent = `下載${level}：一支 2 GB 的影片${t}。`;
+    $("verdict").textContent = `下載${level}：一支 2 GB 的影片${t}。` + (r.unstable ? "這次連線不穩（有斷線或延遲忽高忽低），數字僅供參考。" : "");
     const where = r.colo ? `測速伺服器：${COLO[r.colo] || r.colo}` : "";
     const net = r.net === "cellular" ? "行動數據" : r.net === "wifi" ? "Wi-Fi" : "";
     $("metaLine").textContent = [where, net, `這次用了 ${mb(r.used)} MB`].filter(Boolean).join("　·　");
