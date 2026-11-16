@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>手機測速</title>
+<meta name="theme-color" content="#0f1720">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+/* 版面：單欄手機儀表板——上方大數字讀數，下方三格結果，最下面歷史紀錄 */
+:root {
+  --bg: #eef2f1;          /* 淡灰綠底 */
+  --panel: #ffffff;
+  --ink: #142027;         /* 主要文字 */
+  --muted: #5d6c72;
+  --line: #d5dedc;
+  --accent: #0a8f7a;      /* 訊號綠 */
+  --accent-ink: #ffffff;
+  --down: #0a8f7a;
+  --up: #3b6fd8;
+  --warn-bg: #fff4dc;
+  --warn-ink: #7a4b00;
+  --bad: #c2412d;
+  --num: "Barlow Semi Condensed", "SF Pro Display", "Roboto Condensed", system-ui, sans-serif;
+  --text: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1720; --panel: #17222c; --ink: #e6eef0; --muted: #93a3aa; --line: #263540;
+    --accent: #2cc7a8; --accent-ink: #062520; --down: #2cc7a8; --up: #7aa2ff;
+    --warn-bg: #3a2e12; --warn-ink: #ffd58a; --bad: #ff8a73; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1720; --panel: #17222c; --ink: #e6eef0; --muted: #93a3aa; --line: #263540;
+  --accent: #2cc7a8; --accent-ink: #062520; --down: #2cc7a8; --up: #7aa2ff;
+  --warn-bg: #3a2e12; --warn-ink: #ffd58a; --bad: #ff8a73; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink); font-family: var(--text); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 18px 40px;
+}
+main { max-width: 520px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .02em; }
+.conn { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+
+/* 大讀數 */
+.readout { display: grid; gap: 6px; text-align: center; padding-block: 22px 18px; }
+.phase { font-size: 13px; color: var(--muted); letter-spacing: .08em; }
+.big { font-family: var(--num); font-weight: 700; font-size: clamp(64px, 22vw, 96px); line-height: 1; font-variant-numeric: tabular-nums; }
+.big small { font-size: 22px; font-weight: 600; color: var(--muted); margin-left: 4px; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+.used { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+label { font-size: 13px; color: var(--muted); }
+input[type=text] {
+  flex: 1; min-width: 0; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { font: inherit; font-size: 13px; border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 999px; padding: 4px 10px; }
+button.go {
+  width: 100%; font: inherit; font-size: 17px; font-weight: 700; padding: 15px; border: 0; border-radius: 12px;
+  background: var(--accent); color: var(--accent-ink);
+}
+button.go.stop { background: var(--bad); color: #fff; }
+button:focus-visible, input:focus-visible { outline: 3px solid var(--up); outline-offset: 2px; }
+.hint { font-size: 12.5px; color: var(--muted); text-align: center; margin: 8px 0 0; }
+
+/* 結果三格 */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 10px; text-align: center; min-width: 0; }
+.stat .k { font-size: 12.5px; color: var(--muted); }
+.stat .v { font-family: var(--num); font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.stat .u { font-size: 12px; color: var(--muted); }
+.stat.down .v { color: var(--down); }
+.stat.up .v { color: var(--up); }
+.meta { font-size: 13px; color: var(--muted); display: grid; gap: 2px; }
+.verdict { font-size: 14.5px; }
+
+.warn { background: var(--warn-bg); color: var(--warn-ink); border-radius: 10px; padding: 10px 12px; font-size: 13.5px; }
+
+/* 歷史 */
+h2 { margin: 0 0 8px; font-size: 15px; }
+.hist { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.hist th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 4px 6px; border-bottom: 1px solid var(--line); }
+.hist td { padding: 7px 4px; border-bottom: 1px solid var(--line); }
+.hist td.n { font-family: var(--num); font-size: 16px; font-weight: 600; text-align: right; }
+.hist th.n { text-align: right; }
+.tablewrap { overflow-x: auto; }
+.empty { color: var(--muted); font-size: 13.5px; }
+.linkbtn { font: inherit; font-size: 13px; background: none; border: 0; color: var(--muted); text-decoration: underline; padding: 8px 0 0; }
+.confirm { display: flex; gap: 8px; align-items: center; font-size: 13px; padding-top: 8px; flex-wrap: wrap; }
+.confirm button { font: inherit; font-size: 13px; border-radius: 8px; padding: 6px 12px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+.confirm button.del { background: var(--bad); color: #fff; border-color: var(--bad); }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>手機測速</h1>
+    <span class="conn" id="conn"></span>
+  </header>
+
+  <div class="warn" id="wifiWarn" hidden>你現在連著 Wi-Fi，測到的會是 Wi-Fi 速度。要測行動數據，請先關掉 Wi-Fi。</div>
+
+  <section class="panel readout" aria-live="polite">
+    <div class="phase" id="phase">準備好了</div>
+    <div class="big"><span id="bigNum">—</span><small>Mbps</small></div>
+    <div class="bar"><i id="barFill"></i></div>
+    <div class="used" id="used">每次約用 100 MB 行動數據（下載 80 MB＋上傳 20 MB）</div>
+  </section>
+
+  <section class="panel">
+    <div class="row">
+      <label for="place">地點</label>
+      <input type="text" id="place" placeholder="例如：房間、客廳、學校" maxlength="20" autocomplete="off">
+    </div>
+    <div class="chips" id="chips"></div>
+    <div style="height:12px"></div>
+    <button class="go" id="goBtn" type="button">開始測速</button>
+    <p class="hint">開著 VPN 會變很慢，測之前建議先關掉</p>
+  </section>
+
+  <section class="stats" id="stats">
+    <div class="stat down"><div class="k">下載</div><div class="v" id="rDown">—</div><div class="u">Mbps</div></div>
+    <div class="stat up"><div class="k">上傳</div><div class="v" id="rUp">—</div><div class="u">Mbps</div></div>
+    <div class="stat"><div class="k">延遲</div><div class="v" id="rPing">—</div><div class="u" id="rJit">ms</div></div>
+  </section>
+
+  <section class="panel meta" id="meta" hidden>
+    <div class="verdict" id="verdict"></div>
+    <div id="metaLine"></div>
+  </section>
+
+  <section class="panel">
+    <h2>紀錄</h2>
+    <div id="histBox"></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const BASE = "https://speed.cloudflare.com";
+  const DOWN_STREAMS = 4, DOWN_EACH = 20_000_000;   // 4 × 20 MB = 80 MB
+  const UP_STREAMS = 4, UP_EACH = 5_000_000;        // 4 × 5 MB = 20 MB
+  const PING_COUNT = 12;
+  const KEY = "speedtest-history-v1";
+  const COLO = { TPE: "台北", KHH: "高雄", RMQ: "台中", HKG: "香港", NRT: "東京", HND: "東京", KIX: "大阪", FUK: "福岡", SIN: "新加坡", ICN: "首爾", MNL: "馬尼拉", LAX: "洛杉磯", SJC: "聖荷西" };
+
+  const $ = id => document.getElementById(id);
+  const fmt = n => n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
+  const mb = b => (b / 1e6).toFixed(0);
+
+  // ---------- 歷史紀錄（只存在這支手機的瀏覽器裡） ----------
+  function loadHist() { try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch { return []; } }
+  function saveHist(h) { try { localStorage.setItem(KEY, JSON.stringify(h.slice(0, 60))); } catch {} }
+  function pad(n) { return String(n).padStart(2, "0"); }
+  function when(t) { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+  function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+  function renderHist() {
+    const h = loadHist(), box = $("histBox");
+    if (!h.length) { box.innerHTML = '<p class="empty">還沒有紀錄。填好地點、按「開始測速」，結果會存在這裡，方便比較不同地方。</p>'; renderChips(h); return; }
+    box.innerHTML = `<div class="tablewrap"><table class="hist"><thead><tr><th>時間</th><th>地點</th><th class="n">下載</th><th class="n">上傳</th><th class="n">延遲</th></tr></thead><tbody>${
+      h.map(r => `<tr><td>${when(r.t)}</td><td>${esc(r.place || "—")}${r.net === "wifi" ? "（Wi-Fi）" : ""}</td><td class="n">${fmt(r.down)}</td><td class="n">${fmt(r.up)}</td><td class="n">${Math.round(r.ping)}</td></tr>`).join("")
+    }</tbody></table></div><button class="linkbtn" id="clearBtn" type="button">清除全部紀錄</button><div id="confirmBox"></div>`;
+    $("clearBtn").onclick = () => {
+      $("confirmBox").innerHTML = '<div class="confirm">確定要清除全部紀錄嗎？<button class="del" id="yesDel" type="button">清除</button><button id="noDel" type="button">取消</button></div>';
+      $("yesDel").onclick = () => { saveHist([]); renderHist(); };
+      $("noDel").onclick = () => { $("confirmBox").innerHTML = ""; };
+    };
+    renderChips(h);
+  }
+  function renderChips(h) {
+    const places = [...new Set(h.map(r => r.place).filter(Boolean))].slice(0, 6);
+    $("chips").innerHTML = places.map(p => `<button class="chip" type="button">${esc(p)}</button>`).join("");
+    [...$("chips").children].forEach(b => b.onclick = () => { $("place").value = b.textContent; });
+  }
+
+  // ---------- 連線類型 ----------
+  function netType() { const c = navigator.connection; return c && c.type ? c.type : ""; }
+  function showConn() {
+    const t = netType();
+    $("conn").textContent = t === "cellular" ? "行動數據" : t === "wifi" ? "Wi-Fi" : t ? t : "";
+    $("wifiWarn").hidden = t !== "wifi";
+  }
+  if (navigator.connection && navigator.connection.addEventListener) navigator.connection.addEventListener("change", showConn);
+  showConn();
+
+  // ---------- 測速 ----------
+  let abort = null, xhrs = [], running = false, used = 0, lastColo = "";
+  const setBig = v => { $("bigNum").textContent = v; };
+  const setBar = p => { $("barFill").style.width = Math.min(100, p * 100) + "%"; };
+  const setUsed = () => { $("used").textContent = `已用 ${mb(used)} MB`; };
+  const rnd = () => Math.random().toString(36).slice(2);
+
+  async function measurePing(signal) {
+    const times = []; let colo = "";
+    for (let i = 0; i < PING_COUNT; i++) {
+      const t0 = performance.now();
+      const r = await fetch(`${BASE}/__down?bytes=0&r=${rnd()}`, { cache: "no-store", signal });
+      await r.arrayBuffer();
+      const dt = performance.now() - t0;
+      if (!colo) colo = r.headers.get("cf-meta-colo") || "";
+      if (i > 0) times.push(dt);            // 第一次包含建立連線，不算
+      setBar((i + 1) / PING_COUNT); setBig(Math.round(dt));
+    }
+    const s = [...times].sort((a, b) => a - b);
+    const median = s[Math.floor(s.length / 2)];
+    let jit = 0; for (let i = 1; i < times.length; i++) jit += Math.abs(times[i] - times[i - 1]);
+    return { ping: median, jitter: jit / (times.length - 1), colo };
+  }
+
+  async function measureDown(signal) {
+    let got = 0, tFirst = 0;
+    const total = DOWN_STREAMS * DOWN_EACH;
+    const tick = setInterval(() => {
+      if (tFirst) { const sec = (performance.now() - tFirst) / 1000; if (sec > 0.3) setBig(fmt(got * 8 / sec / 1e6)); }
+      setBar(got / total); setUsed();
+    }, 250);
+    try {
+      await Promise.all(Array.from({ length: DOWN_STREAMS }, async () => {
+        const r = await fetch(`${BASE}/__down?bytes=${DOWN_EACH}&r=${rnd()}`, { cache: "no-store", signal });
+        if (!r.ok) throw new Error("下載伺服器回應 " + r.status);
+        if (!lastColo) lastColo = r.headers.get("cf-meta-colo") || "";
+        const reader = r.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!tFirst) tFirst = performance.now();
+          got += value.length; used += value.length;
+        }
+      }));
+    } finally { clearInterval(tick); }
+    return got * 8 / ((performance.now() - tFirst) / 1000) / 1e6;
+  }
+
+  function measureUp() {
+    const chunk = new Uint8Array(UP_EACH);
+    for (let i = 0; i < UP_EACH; i += 65536) crypto.getRandomValues(chunk.subarray(i, Math.min(i + 65536, UP_EACH)));
+    const sent = new Array(UP_STREAMS).fill(0), total = UP_STREAMS * UP_EACH;
+    const t0 = performance.now(); let base = used;
+    const tick = setInterval(() => {
+      const s = sent.reduce((a, b) => a + b, 0), sec = (performance.now() - t0) / 1000;
+      used = base + s; setUsed(); setBar(s / total);
+      if (sec > 0.5) setBig(fmt(s * 8 / sec / 1e6));
+    }, 250);
+    return Promise.all(Array.from({ length: UP_STREAMS }, (_, i) => new Promise((res, rej) => {
+      const x = new XMLHttpRequest(); xhrs.push(x);
+      x.open("POST", `${BASE}/__up?r=${rnd()}`);
+      x.setRequestHeader("Content-Type", "text/plain");
+      x.upload.onprogress = e => { sent[i] = e.loaded; };
+      x.onload = () => { sent[i] = UP_EACH; res(); };
+      x.onerror = () => rej(new Error("上傳失敗，請確認網路"));
+      x.onabort = () => rej(new DOMException("aborted", "AbortError"));
+      x.send(new Blob([chunk]));
+    }))).then(() => {
+      const sec = (performance.now() - t0) / 1000;
+      used = base + total; setUsed();
+      return total * 8 / sec / 1e6;
+    }).finally(() => clearInterval(tick));
+  }
+
+  async function run() {
+    running = true; used = 0; xhrs = [];
+    abort = new AbortController();
+    const btn = $("goBtn"); btn.textContent = "停止"; btn.classList.add("stop");
+    ["rDown", "rUp", "rPing"].forEach(id => $(id).textContent = "—"); $("rJit").textContent = "ms";
+    $("meta").hidden = true;
+    let lock = null; try { lock = await navigator.wakeLock?.request("screen"); } catch {}
+    try {
+      $("phase").textContent = "1／3　測延遲"; setBar(0);
+      const p = await measurePing(abort.signal);
+      $("rPing").textContent = Math.round(p.ping); $("rJit").textContent = `ms｜抖動 ${Math.round(p.jitter)}`;
+
+      $("phase").textContent = "2／3　測下載"; setBar(0); setBig("0");
+      const down = await measureDown(abort.signal);
+      $("rDown").textContent = fmt(down);
+
+      $("phase").textContent = "3／3　測上傳"; setBar(0); setBig("0");
+      const up = await measureUp();
+      $("rUp").textContent = fmt(up);
+
+      $("phase").textContent = "完成"; setBig(fmt(down)); setBar(1);
+      const place = $("place").value.trim();
+      const rec = { t: Date.now(), place, down, up, ping: p.ping, jitter: p.jitter, colo: p.colo || lastColo, net: netType(), used };
+      const h = loadHist(); h.unshift(rec); saveHist(h); renderHist();
+      showVerdict(rec);
+    } catch (e) {
+      if (e.name === "AbortError") { $("phase").textContent = "已停止"; }
+      else { $("phase").textContent = "測速失敗：" + (e.message || "連不到測速伺服器") + "。確認有網路、VPN 已關後再試一次。"; }
+      setBig("—");
+    } finally {
+      running = false; btn.textContent = "開始測速"; btn.classList.remove("stop");
+      setUsed(); try { lock && lock.release(); } catch {}
+    }
+  }
+
+  function showVerdict(r) {
+    const min2g = (2e9 * 8 / (r.down * 1e6)) / 60;
+    const level = r.down >= 200 ? "很快" : r.down >= 50 ? "不錯" : r.down >= 10 ? "普通" : "很慢";
+    const t = min2g < 1 ? "不到 1 分鐘" : min2g < 60 ? `約 ${Math.round(min2g)} 分鐘` : `約 ${(min2g / 60).toFixed(1)} 小時`;
+    $("verdict").textContent = `下載${level}：一支 2 GB 的影片${t}。`;
+    const where = r.colo ? `測速伺服器：${COLO[r.colo] || r.colo}` : "";
+    const net = r.net === "cellular" ? "行動數據" : r.net === "wifi" ? "Wi-Fi" : "";
+    $("metaLine").textContent = [where, net, `這次用了 ${mb(r.used)} MB`].filter(Boolean).join("　·　");
+    $("meta").hidden = false;
+  }
+
+  $("goBtn").onclick = () => {
+    if (running) { abort && abort.abort(); xhrs.forEach(x => { try { x.abort(); } catch {} }); return; }
+    run();
+  };
+  renderHist();
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+})();
+</script>
+</body>
+</html>
