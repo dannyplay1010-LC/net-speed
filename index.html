@@ -121,7 +121,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
 
   <section class="panel readout" aria-live="polite">
     <div class="phase" id="phase">準備好了</div>
-    <div class="big"><span id="bigNum">--</span><small>Mbps</small></div>
+    <div class="big"><span id="bigNum">0</span><small>Mbps</small></div>
     <div class="bar"><i id="barFill"></i></div>
     <div class="used" id="used">每次約用 100 MB 行動數據（下載 80 MB＋上傳 20 MB）</div>
   </section>
@@ -205,7 +205,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
   showConn();
 
   // ---------- 測速 ----------
-  let abort = null, xhrs = [], running = false, used = 0, lastColo = "";
+  let abort = null, running = false, used = 0, lastColo = "";
   const setBig = v => { $("bigNum").textContent = v; };
   const setBar = p => { $("barFill").style.width = Math.min(100, p * 100) + "%"; };
   const setUsed = () => { $("used").textContent = `已用 ${mb(used)} MB`; };
@@ -262,40 +262,50 @@ h2 { margin: 0 0 8px; font-size: 15px; }
     return { mbps: got * 8 / sec / 1e6, unstable: fails > 0 };
   }
 
-  // 上傳：4 條同時傳，最多 20 MB 或 15 秒；某一條斷線就用已送出的量算
-  function measureUp(signal) {
-    const chunk = new Uint8Array(UP_EACH);
-    for (let i = 0; i < UP_EACH; i += 65536) crypto.getRandomValues(chunk.subarray(i, Math.min(i + 65536, UP_EACH)));
-    const sent = new Array(UP_STREAMS).fill(0), total = UP_STREAMS * UP_EACH;
-    const t0 = performance.now(), base = used; let tEnd = 0, fails = 0;
-    const sum = () => sent.reduce((a, b) => a + b, 0);
+  // 上傳：4 條同時傳，每次送一小塊、傳完一塊算一塊（手機 Chrome 的上傳進度要整塊傳完才回報）。
+  // 每塊從 256 KB 開始，順利就加倍到 2 MB；總共最多 20 MB 或 15 秒。
+  async function measureUp(signal) {
+    const MAX_CHUNK = 2_000_000, total = UP_STREAMS * UP_EACH;
+    const pool = new Uint8Array(MAX_CHUNK);
+    for (let i = 0; i < MAX_CHUNK; i += 65536) crypto.getRandomValues(pool.subarray(i, Math.min(i + 65536, MAX_CHUNK)));
+    const stop = new AbortController();
+    const onUserAbort = () => stop.abort();
+    signal.addEventListener("abort", onUserAbort);
+    const t0 = performance.now(), base = used;
+    let done = 0, claimed = 0, tLast = 0, fails = 0;
+    const deadline = setTimeout(() => stop.abort(), UP_MAX_SEC * 1000);
     const tick = setInterval(() => {
-      const s = sum(), sec = (performance.now() - t0) / 1000;
-      used = base + s; setUsed(); setBar(Math.max(s / total, sec / UP_MAX_SEC));
-      if (sec > 0.5) setBig(fmt(s * 8 / sec / 1e6));
+      const sec = (performance.now() - t0) / 1000;
+      used = base + done; setUsed(); setBar(Math.max(done / total, sec / UP_MAX_SEC));
+      if (sec > 0.5 && done) setBig(fmt(done * 8 / sec / 1e6));
     }, 250);
-    const mine = [];
-    const deadline = setTimeout(() => { tEnd = performance.now(); mine.forEach(x => { try { x.abort(); } catch {} }); }, UP_MAX_SEC * 1000);
-    return Promise.all(Array.from({ length: UP_STREAMS }, (_, i) => new Promise(res => {
-      const x = new XMLHttpRequest(); xhrs.push(x); mine.push(x);
-      x.open("POST", `${BASE}/__up?r=${rnd()}`);
-      x.setRequestHeader("Content-Type", "text/plain");
-      x.upload.onprogress = e => { sent[i] = e.loaded; };
-      x.onload = () => { sent[i] = UP_EACH; res(); };
-      x.onerror = () => { fails++; res(); };
-      x.onabort = () => res();
-      x.send(new Blob([chunk]));
-    }))).then(() => {
-      if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      const s = sum();
-      if (!s) throw new Error("上傳沒有送出資料");
-      used = base + s; setUsed();
-      return { mbps: s * 8 / (((tEnd || performance.now()) - t0) / 1000) / 1e6, unstable: fails > 0 };
-    }).finally(() => { clearInterval(tick); clearTimeout(deadline); });
+    try {
+      await Promise.all(Array.from({ length: UP_STREAMS }, async () => {
+        let size = 256_000;
+        while (!stop.signal.aborted && claimed < total) {
+          const n = Math.min(size, total - claimed); claimed += n;
+          try {
+            const r = await fetch(`${BASE}/__up?r=${rnd()}`, { method: "POST", body: pool.subarray(0, n), headers: { "Content-Type": "text/plain" }, signal: stop.signal, cache: "no-store" });
+            await r.arrayBuffer();
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            done += n; tLast = performance.now();
+            size = Math.min(size * 2, MAX_CHUNK);
+          } catch (e) {
+            claimed -= n;
+            if (stop.signal.aborted) break;
+            if (++fails > 8) break;
+          }
+        }
+      }));
+    } finally { clearInterval(tick); clearTimeout(deadline); signal.removeEventListener("abort", onUserAbort); }
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (!done) throw new Error("上傳太慢，15 秒內一塊都沒傳完");
+    used = base + done; setUsed();
+    return { mbps: done * 8 / ((tLast - t0) / 1000) / 1e6, unstable: fails > 0 };
   }
 
   async function run() {
-    running = true; used = 0; xhrs = [];
+    running = true; used = 0;
     abort = new AbortController();
     const btn = $("goBtn"); btn.textContent = "停止"; btn.classList.add("stop");
     ["rDown", "rUp", "rPing"].forEach(id => $(id).textContent = "—"); $("rJit").textContent = "ms";
@@ -323,7 +333,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
     } catch (e) {
       if (e.name === "AbortError") { $("phase").textContent = "已停止"; }
       else { $("phase").textContent = "測速失敗：" + (e.message || "連不到測速伺服器") + "。確認有網路、VPN 已關後再試一次。"; }
-      setBig("--");
+      setBig("0");
     } finally {
       running = false; btn.textContent = "開始測速"; btn.classList.remove("stop");
       setUsed(); try { lock && lock.release(); } catch {}
@@ -342,7 +352,7 @@ h2 { margin: 0 0 8px; font-size: 15px; }
   }
 
   $("goBtn").onclick = () => {
-    if (running) { abort && abort.abort(); xhrs.forEach(x => { try { x.abort(); } catch {} }); return; }
+    if (running) { abort && abort.abort(); return; }
     run();
   };
   renderHist();
